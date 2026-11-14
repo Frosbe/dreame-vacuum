@@ -5824,8 +5824,9 @@ class DreameVacuumMapDecoder:
                         else:
                             current_map_data.obstacles[str(len(current_map_data.obstacles) + 1)] = obstacle
 
-                    if map_data.deleted_obstacles:
-                        del_set = set(map(str, map_data.deleted_obstacles))
+                    deleted_obstacles = getattr(map_data, "deleted_obstacles", None)
+                    if deleted_obstacles:
+                        del_set = set(map(str, deleted_obstacles))
                         current_map_data.obstacles = {
                             str(i): item
                             for i, item in enumerate(
@@ -5857,8 +5858,9 @@ class DreameVacuumMapDecoder:
                         else:
                             current_map_data.low_lying_areas.append(area)
 
-                    if map_data.deleted_low_lying_areas:
-                        del_set = set(map(str, map_data.deleted_low_lying_areas))
+                    deleted_low_lying_areas = getattr(map_data, "deleted_low_lying_areas", None)
+                    if deleted_low_lying_areas:
+                        del_set = set(map(str, deleted_low_lying_areas))
                         current_map_data.low_lying_areas = list(
                             filter(lambda item: str(item.id) not in del_set, current_map_data.low_lying_areas)
                         )
