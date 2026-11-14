@@ -2591,6 +2591,11 @@ class DreameVacuumDevice:
                 if not self._protocol.dreame_cloud:
                     self._protocol.set_credentials(self.host, self.token, self.mac, self.account_type)
 
+    def set_map_cache_path(self, path: str) -> None:
+        """Set the folder used for keeping the last received map on disk"""
+        if self._map_manager:
+            self._map_manager.set_cache_path(path)
+
     def disconnect(self) -> None:
         """Disconnect from device and cancel timers"""
         _LOGGER.info("Disconnect")

@@ -35,6 +35,7 @@ from typing import Optional, Tuple
 from threading import Timer
 from .resources import *
 from .protocol import DreameVacuumProtocol
+from .map_cache import DreameVacuumMapCache
 from .exceptions import DeviceException
 from .types import (
     PIID,
@@ -168,6 +169,13 @@ class DreameMapVacuumMapManager:
         self._connected: bool = True
         self._aes_iv: str = None
         self._capability: DreameVacuumDeviceCapability = None
+        self._cache: DreameVacuumMapCache = None
+        self._cache_loading: bool = False
+        self._cache_miss_count: int = 0
+        self._rebase_map_id: int = None
+        self._rebase_time: float = None
+        self._rebase_frames: dict[int, MapDataPartial] = {}
+        self._rebased_map_id: int = None
 
         self._init_data()
 
@@ -554,10 +562,10 @@ class DreameMapVacuumMapManager:
             values = object_name.split(",")
             object_name = values[0]
             key = values[1]
-        response = self._get_interim_file_data(object_name, timestamp)
+        response = self._get_interim_file_data(object_name, timestamp, key)
         return response, key
 
-    def _get_interim_file_data(self, object_name: str = "", timestamp=None) -> str | None:
+    def _get_interim_file_data(self, object_name: str = "", timestamp=None, key=None) -> str | None:
         if self._protocol.cloud.logged_in:
             if object_name is None or object_name == "":
                 _LOGGER.info("Get object name from cloud")
@@ -582,10 +590,18 @@ class DreameMapVacuumMapManager:
                 _LOGGER.info("Request map data from cloud %s", url)
                 response = self._protocol.cloud.get_file(url)
                 if response is not None:
+                    if self._cache:
+                        self._cache.save_object(object_name, response, key)
                     return response
                 _LOGGER.warning("Request map data from cloud failed %s", url)
                 if self._file_urls.get(object_name):
                     del self._file_urls[object_name]
+
+            if self._cache and object_name:
+                response = self._cache.load_object(object_name, key)
+                if response is not None:
+                    _LOGGER.info("Using cached map object %s", object_name)
+                    return response
 
     def _get_file_url(self, object_name: str, interim: bool = True) -> str | None:
         url = None
@@ -622,14 +638,120 @@ class DreameMapVacuumMapManager:
                 self._latest_map_timestamp_ms = partial_map.timestamp_ms
                 self._latest_map_id = partial_map.map_id
 
+            if self._cache and not self._cache_loading and partial_map.frame_type == MapFrameType.I.value:
+                # Stored on disk by _add_map_data once the frame turns out to be a usable map
+                partial_map.cache_source = (raw_map, key)
+
         return partial_map
+
+    def _load_cached_map(self) -> bool:
+        """Use the last full map stored on disk when the device or the cloud can not provide one."""
+        if self._cache is None:
+            return False
+        cached_map = self._cache.load_map()
+        if cached_map is None:
+            return False
+        raw_map, key, timestamp = cached_map
+        self._cache_loading = True
+        try:
+            partial_map = DreameVacuumMapDecoder.decode_map_partial(raw_map, self.map_version, self._aes_iv, key)
+            if partial_map is None or partial_map.frame_type != MapFrameType.I.value:
+                return False
+            if timestamp and (partial_map.timestamp_ms is None or partial_map.timestamp_ms < 1577826000000):
+                partial_map.timestamp_ms = timestamp
+            # Cached frame is older than anything received so far, make sure it is still accepted
+            self._latest_map_timestamp_ms = partial_map.timestamp_ms
+            self._latest_map_id = partial_map.map_id
+            self._current_frame_id = None
+            self._current_map_id = None
+            self._current_timestamp_ms = None
+            self._add_map_data(partial_map)
+            if self._map_data is None:
+                return False
+            _LOGGER.warning("No map received from the device, using the cached map (%s)", partial_map.map_id)
+            return True
+        except Exception:
+            _LOGGER.warning("Loading cached map failed: %s", traceback.format_exc())
+            return False
+        finally:
+            self._cache_loading = False
+
+    def _rebase_map(self, partial_map: MapDataPartial) -> bool:
+        """P frames of a new map are useless without its I frame. When that I frame never arrives
+        (device is not able to upload it to the cloud storage), continue on the current map instead
+        of dropping the frames, so robot position and path are still updated."""
+        if partial_map is None or self._cache is None:
+            return False
+
+        if (
+            self._map_data is None
+            or self._map_data.empty_map
+            or partial_map.map_id != self._latest_map_id
+            or (self._current_map_id == partial_map.map_id and self._current_frame_id is not None)
+        ):
+            if self._rebase_map_id is not None and self._current_map_id == partial_map.map_id:
+                self._rebase_map_id = None
+                self._rebase_frames = {}
+            return False
+
+        now = time.time()
+        if self._rebase_map_id != partial_map.map_id:
+            self._rebase_map_id = partial_map.map_id
+            self._rebase_time = now
+            self._rebase_frames = {}
+
+        self._rebase_frames[partial_map.frame_id] = partial_map
+        if now - self._rebase_time < 15:
+            # Give the device some time to deliver the I frame
+            return False
+
+        frames = self._rebase_frames
+        self._rebase_map_id = None
+        self._rebase_frames = {}
+        first_frame_id = min(frames)
+        _LOGGER.warning(
+            "No full map received for map %s, continuing on the current map from frame %s",
+            partial_map.map_id,
+            first_frame_id,
+        )
+
+        self._map_data.map_id = partial_map.map_id
+        self._map_data.frame_id = first_frame_id - 1
+        self._map_data.path = None
+        self._current_map_id = partial_map.map_id
+        self._current_frame_id = first_frame_id - 1
+        self._current_timestamp_ms = None
+        self._updated_frame_id = None
+        self._rebased_map_id = partial_map.map_id
+        if partial_map.map_id in self._map_data_queue:
+            del self._map_data_queue[partial_map.map_id]
+
+        for frame_id in sorted(frames):
+            self._add_map_data(frames[frame_id])
+        return True
+
+    def _skip_missing_partial_maps(self) -> None:
+        """Missing P frames can not be recovered with a new I frame on a rebased map, continue from the next one"""
+        queue = self._map_data_queue.get(self._latest_map_id)
+        if not queue or self._map_data is None:
+            return
+        first_frame_id = min(queue)
+        _LOGGER.info("Skip missing P maps: %s -> %s", self._current_frame_id, first_frame_id)
+        self._current_frame_id = first_frame_id - 1
+        self._map_data.frame_id = first_frame_id - 1
+        # Apply every queued frame that is in sequence now
+        for _ in range(len(queue)):
+            next_partial_map = self._unqueue_next_partial_map()
+            if next_partial_map is None:
+                break
+            self._add_map_data(next_partial_map)
 
     def _add_cloud_map_data(self, partial_map_data, object_name, object_name_timestamp):
         if partial_map_data:
             for partial_map in partial_map_data:
                 if partial_map.frame_type == MapFrameType.I.value:
                     self._add_map_data(partial_map)
-                else:
+                elif not self._rebase_map(partial_map):
                     self._queue_partial_map(partial_map)
 
         next_frame_id = 1
@@ -642,7 +764,9 @@ class DreameMapVacuumMapManager:
         ):
             self._delete_invalid_partial_maps()
             tmpLen = self._partial_map_queue_size()
-            if tmpLen > 8:
+            if tmpLen > 2 and self._rebased_map_id is not None and self._rebased_map_id == self._latest_map_id:
+                self._skip_missing_partial_maps()
+            elif tmpLen > 8:
                 if self._protocol.dreame_cloud:
                     self._request_map()
                 else:
@@ -767,7 +891,9 @@ class DreameMapVacuumMapManager:
                 tmpLen = self._partial_map_queue_size()
                 if tmpLen > 0:
                     if self._protocol.dreame_cloud:
-                        if tmpLen > 8:
+                        if tmpLen > 2 and self._rebased_map_id is not None and self._rebased_map_id == self._latest_map_id:
+                            self._skip_missing_partial_maps()
+                        elif tmpLen > 8:
                             self._request_map()
                         elif tmpLen > 4:
                             self._request_missing_p_map()
@@ -821,6 +947,12 @@ class DreameMapVacuumMapManager:
                     self._map_data_changed()
                 self._add_next_map_data()
                 return True
+
+            cache_source = getattr(partial_map, "cache_source", None)
+            if self._cache and cache_source:
+                self._cache.save_map(cache_source[0], cache_source[1], partial_map.timestamp_ms)
+            if not self._cache_loading:
+                self._rebased_map_id = None
 
             saved_map_changed = False
             if saved_map_data is not None and saved_map_data.saved_map:
@@ -1526,8 +1658,20 @@ class DreameMapVacuumMapManager:
                 if self._error_callback:
                     self._error_callback(DeviceException(ex))
 
+        if self._cache is not None:
+            if self._map_data is not None or not self._protocol.cloud.logged_in:
+                self._cache_miss_count = 0
+            else:
+                self._cache_miss_count = self._cache_miss_count + 1
+                if self._cache_miss_count >= 3:
+                    self._cache_miss_count = 0
+                    self._load_cached_map()
+
         self._ready = True
         self._update_running = False
+
+    def set_cache_path(self, path: str) -> None:
+        self._cache = DreameVacuumMapCache(path) if path else None
 
     def set_capability(self, capability) -> None:
         self._capability = capability
@@ -5824,8 +5968,9 @@ class DreameVacuumMapDecoder:
                         else:
                             current_map_data.obstacles[str(len(current_map_data.obstacles) + 1)] = obstacle
 
-                    if map_data.deleted_obstacles:
-                        del_set = set(map(str, map_data.deleted_obstacles))
+                    deleted_obstacles = getattr(map_data, "deleted_obstacles", None)
+                    if deleted_obstacles:
+                        del_set = set(map(str, deleted_obstacles))
                         current_map_data.obstacles = {
                             str(i): item
                             for i, item in enumerate(
@@ -5857,8 +6002,9 @@ class DreameVacuumMapDecoder:
                         else:
                             current_map_data.low_lying_areas.append(area)
 
-                    if map_data.deleted_low_lying_areas:
-                        del_set = set(map(str, map_data.deleted_low_lying_areas))
+                    deleted_low_lying_areas = getattr(map_data, "deleted_low_lying_areas", None)
+                    if deleted_low_lying_areas:
+                        del_set = set(map(str, deleted_low_lying_areas))
                         current_map_data.low_lying_areas = list(
                             filter(lambda item: str(item.id) not in del_set, current_map_data.low_lying_areas)
                         )

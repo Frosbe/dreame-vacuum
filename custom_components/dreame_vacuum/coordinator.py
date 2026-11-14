@@ -174,6 +174,7 @@ class DreameVacuumDataUpdateCoordinator(DataUpdateCoordinator[DreameVacuumDevice
             entry.data.get(CONF_DID),
             self._auth_key,
         )
+        self._device.set_map_cache_path(hass.config.path(".storage", f"{DOMAIN}_map_cache", entry.entry_id))
 
         self._device.listen(self._dust_collection_changed, DreameVacuumProperty.DUST_COLLECTION)
         self._device.listen(self._error_changed, DreameVacuumProperty.ERROR)
