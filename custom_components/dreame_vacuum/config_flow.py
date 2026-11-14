@@ -42,6 +42,7 @@ from .const import (
     CONF_PREFER_CLOUD,
     CONF_LOW_RESOLUTION,
     CONF_SQUARE,
+    CONF_MAP_CACHE,
     CONF_VERSION,
     CONF_DVC_KEY,
     MAP_OBJECTS,
@@ -150,6 +151,10 @@ class DreameVacuumOptionsFlowHandler(OptionsFlow):
                     vol.Required(
                         CONF_LOW_RESOLUTION,
                         default=self._config_entry.options.get(CONF_LOW_RESOLUTION, False),
+                    ): bool,
+                    vol.Required(
+                        CONF_MAP_CACHE,
+                        default=self._config_entry.options.get(CONF_MAP_CACHE, False),
                     ): bool,
                 }
             )

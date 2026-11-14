@@ -119,6 +119,7 @@
           "square": "Square map",
           "configuration_type": "Configuration type",
           "prefer_cloud": "Prefer cloud connection",
+          "map_cache": "Keep the map when the device can not reach the cloud map storage",
           "dvc_key": "Dreame Vacuum Card Key"
         }
       }

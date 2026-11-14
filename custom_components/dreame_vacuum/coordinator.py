@@ -40,6 +40,7 @@ from .const import (
     CONF_AUTH_KEY,
     CONF_ACCOUNT_TYPE,
     CONF_PREFER_CLOUD,
+    CONF_MAP_CACHE,
     CONF_MAP_OBJECTS,
     CONF_HIDDEN_MAP_OBJECTS,
     CONF_VERSION,
@@ -174,6 +175,8 @@ class DreameVacuumDataUpdateCoordinator(DataUpdateCoordinator[DreameVacuumDevice
             entry.data.get(CONF_DID),
             self._auth_key,
         )
+        if entry.options.get(CONF_MAP_CACHE, False):
+            self._device.set_map_cache_path(hass.config.path(".storage", f"{DOMAIN}_map_cache", entry.entry_id))
 
         self._device.listen(self._dust_collection_changed, DreameVacuumProperty.DUST_COLLECTION)
         self._device.listen(self._error_changed, DreameVacuumProperty.ERROR)
