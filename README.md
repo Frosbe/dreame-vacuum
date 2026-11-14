@@ -1,3 +1,37 @@
+> **Fork notice**
+>
+> This is a fork of [Tasshack/dreame-vacuum](https://github.com/Tasshack/dreame-vacuum),
+> based on v2.0.3, with one addition: the map keeps working when the robot is
+> firewalled from Dreame's map storage.
+>
+> **What is different**
+> - The last full map and downloaded map files are cached on disk
+>   (`.storage/dreame_vacuum_map_cache/`) and reused after a restart when the
+>   robot cannot deliver a new one.
+> - Live position and path are drawn on the cached map when the robot starts a
+>   new map but cannot upload it.
+> - Rooms come with the cached map, so room entities and room cleaning keep
+>   working.
+>
+> **What you need to allow for the robot**
+> - Only the Dreame MQTT broker for your region (TCP 19973). Map storage can be
+>   blocked once a map has been cached.
+>
+> **Limits**
+> - The map is frozen at the last cached version. Changes made in the app
+>   (rooms renamed, split or merged, no-go zones) only show up after you allow
+>   map storage for one clean.
+> - The first seconds of the path are missing on each clean, and the path can
+>   have small gaps.
+> - Cleaning history maps and obstacle photos are not available.
+> - Tested on a Dreame X50 Ultra with a Dreamehome account only.
+>
+> **Install**: add this repository to HACS as a custom repository (type
+> Integration), install, restart Home Assistant.
+>
+> Everything else below is the upstream README. All credit for the integration
+> goes to [@Tasshack](https://github.com/Tasshack).
+
 <center>
 <div align="center">
 
